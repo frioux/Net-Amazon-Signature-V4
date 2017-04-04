@@ -111,10 +111,7 @@ sub _canonical_request {
 
 	# There's a bug in AMS4 which causes requests without x-amz-date set to be rejected
 	# so we always add one if its not present.
-	my $amz_date = $req->header('x-amz-date');
-	if (!$amz_date) {
-		$req->header('X-Amz-Date' => _req_timepiece($req)->strftime('%Y%m%dT%H%M%SZ'));
-	}
+	_req_timepiece($req);
 	my @sorted_headers = _headers_to_sign( $req );
 	my $creq_canonical_headers = join '',
 		map {
@@ -235,13 +232,23 @@ sub _str_to_timepiece {
 }
 sub _req_timepiece {
 	my $req = shift;
-	my $date = $req->header('X-Amz-Date') || $req->header('Date');
+	return $req->{'_piece'} if $req->{'_piece'};
+	my $x_date = $req->header('X-Amz-Date');
+	my $date = $x_date || $req->header('Date');
 	if (!$date) {
-		# No date set by the caller so set one up
-		$req->date(time);
-		$date = $req->header('Date');
+		my $piece = $req->{'_piece'} = Time::Piece->gmtime;
+		my $str = $piece->strftime('%Y%m%dT%H%M%SZ');
+		$req->header('Date' => $str);
+		$req->header('X-Amz-Date' => $str);
+		return $piece
+	} else {
+		my $piece = $req->{'_piece'} = _str_to_timepiece($date);
+		if (!$x_date) {
+			my $str = $piece->strftime('%Y%m%dT%H%M%SZ');
+			$req->header('X-Amz-Date' => $str);
+		}
+		return $piece
 	}
-	return _str_to_timepiece($date);
 }
 
 =head1 BUGS
