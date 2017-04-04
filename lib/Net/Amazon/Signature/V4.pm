@@ -5,7 +5,7 @@ use warnings;
 use sort 'stable';
 
 use Digest::SHA qw/sha256_hex hmac_sha256 hmac_sha256_hex/;
-use DateTime::Format::Strptime qw/strptime/;
+use Time::Piece ();
 use URI::Escape;
 
 our $ALGORITHM = 'AWS4-HMAC-SHA256';
@@ -111,10 +111,7 @@ sub _canonical_request {
 
 	# There's a bug in AMS4 which causes requests without x-amz-date set to be rejected
 	# so we always add one if its not present.
-	my $amz_date = $req->header('x-amz-date');
-	if (!$amz_date) {
-		$req->header('X-Amz-Date' => _req_datetime($req)->strftime('%Y%m%dT%H%M%SZ'));
-	}
+	_req_timepiece($req);
 	my @sorted_headers = _headers_to_sign( $req );
 	my $creq_canonical_headers = join '',
 		map {
@@ -135,7 +132,7 @@ sub _canonical_request {
 
 sub _string_to_sign {
 	my ( $self, $req ) = @_;
-	my $dt = _req_datetime( $req );
+	my $dt = _req_timepiece( $req );
 	my $creq = $self->_canonical_request($req);
 	my $sts_request_date = $dt->strftime( '%Y%m%dT%H%M%SZ' );
 	my $sts_credential_scope = join '/', $dt->strftime('%Y%m%d'), $self->{endpoint}, $self->{service}, 'aws4_request';
@@ -151,7 +148,7 @@ sub _string_to_sign {
 sub _authorization {
 	my ( $self, $req ) = @_;
 
-	my $dt = _req_datetime( $req );
+	my $dt = _req_timepiece( $req );
 	my $sts = $self->_string_to_sign( $req );
 	my $k_date    = hmac_sha256( $dt->strftime('%Y%m%d'), 'AWS4' . $self->{secret} );
 	my $k_region  = hmac_sha256( $self->{endpoint},        $k_date    );
@@ -222,26 +219,36 @@ sub _key_val_split {
 sub _trim_whitespace {
 	return map { s/^\s*(.*?)\s*$/$1/; $_ } @_;
 }
-sub _str_to_datetime {
+sub _str_to_timepiece {
 	my $date = shift;
 	if ( $date =~ m/^\d{8}T\d{6}Z$/ ) {
 		# assume basic ISO 8601, as demanded by AWS
-		return strptime( '%Y%m%dT%H%M%SZ', $date );
+		return Time::Piece->strptime($date, '%Y%m%dT%H%M%SZ');
 	} else {
 		# assume the format given in the AWS4 test suite
-		$date =~ s/^.{4}//; # remove weekday, as Amazon's test suite contains internally inconsistent dates
-		return strptime(  '%d %b %Y %H:%M:%S %Z', $date );
+		$date =~ s/^.{5}//; # remove weekday, as Amazon's test suite contains internally inconsistent dates
+		return Time::Piece->strptime($date, '%d %b %Y %H:%M:%S %Z');
 	}
 }
-sub _req_datetime {
+sub _req_timepiece {
 	my $req = shift;
-	my $date = $req->header('X-Amz-Date') || $req->header('Date');
+	return $req->{'_piece'} if $req->{'_piece'};
+	my $x_date = $req->header('X-Amz-Date');
+	my $date = $x_date || $req->header('Date');
 	if (!$date) {
-		# No date set by the caller so set one up
-		$req->date(time);
-		$date = $req->header('Date');
+		my $piece = $req->{'_piece'} = Time::Piece->gmtime;
+		my $str = $piece->strftime('%Y%m%dT%H%M%SZ');
+		$req->header('Date' => $str);
+		$req->header('X-Amz-Date' => $str);
+		return $piece
+	} else {
+		my $piece = $req->{'_piece'} = _str_to_timepiece($date);
+		if (!$x_date) {
+			my $str = $piece->strftime('%Y%m%dT%H%M%SZ');
+			$req->header('X-Amz-Date' => $str);
+		}
+		return $piece
 	}
-	return _str_to_datetime($date);
 }
 
 =head1 BUGS
